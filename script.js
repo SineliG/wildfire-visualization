@@ -84,7 +84,7 @@ let interval = null;
 let projection, path, durationScale, sizeScale;
 
 (async function init() {
-  fires = await d3.json("https://SineliG.github.io/wildfire-visualization/fires.json.gz");
+  fires = await d3.json("data/fires.json");
   const formatDate = d3.timeFormat("%B %d, %Y");
   const formatInputDate = d3.timeFormat("%Y-%m-%d");
 
