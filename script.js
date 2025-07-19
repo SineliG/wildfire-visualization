@@ -1,8 +1,8 @@
 import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
 import * as topojson from "https://cdn.jsdelivr.net/npm/topojson@3/+esm";
 
-const width = 600,
-  height = 800;
+const width = 700,
+  height = 900;
 
 const container = document.getElementById("vis");
 const main = document.createElement("div");
