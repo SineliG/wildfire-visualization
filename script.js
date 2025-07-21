@@ -198,7 +198,8 @@ let projection, path, durationScale, sizeScale;
          !isNaN(d.lon) &&
          !isNaN(d.size) &&
          !isNaN(d.duration) &&
-         (query === "" || d.name.toLowerCase().includes(query))
+        //  (query === "" || d.name.toLowerCase().includes(query))
+        (query === "" || (d.name && d.name.toLowerCase().includes(query)))
      );
 
 
@@ -261,7 +262,7 @@ let projection, path, durationScale, sizeScale;
    clearInterval(interval);
    playBtn.textContent = "▶ Play";
  }
- 
+
 ////
 // Legend dimensions and positions
 const legendWidth = 260;
@@ -361,7 +362,11 @@ sizeLegend.append("text")
    }
  });
  causeFilter.addEventListener("change", update);
- searchBox.addEventListener("input", update);
+//  searchBox.addEventListener("input", update);
+searchBox.addEventListener("input", (e) => {
+  console.log("Search changed:", e.target.value);
+  update();
+});
  playBtn.addEventListener("click", () => {
    if (interval) pause();
    else play();
