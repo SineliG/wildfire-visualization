@@ -34,11 +34,8 @@ async function initializeFireMap() {
   const legendGroup = svg.append('g').attr('transform', `translate(${width - 140}, 20)`);
 
   // --- Data and Scales ---
-  // THIS IS THE CRITICAL CHANGE: from `d3.csv` to `d3.json`
   const fires = await d3.json('data/fires.json');
 
-  // The rest of the parsing logic is now done in a `.map` call,
-  // since `d3.json` doesn't have a built-in row parsing function.
   const parsedFires = fires.map(d => {
     const parsed = {
       ...d,
@@ -53,7 +50,7 @@ async function initializeFireMap() {
       return null;
     }
     return parsed;
-  }).filter(d => d); // Filter out any null entries
+  }).filter(d => d);
 
   const formatDate = d3.timeFormat('%B %d, %Y');
   const formatInputDate = d3.timeFormat('%Y-%m-%d');
@@ -201,7 +198,7 @@ async function initializeFireMap() {
   const statsContainer = document.createElement('div');
   statsContainer.style.cssText = `
     position: absolute;
-    top: 490px;
+    bottom: 20px; /* Changed from top */
     right: 20px;
     width: 200px;
     background: white;
@@ -497,6 +494,7 @@ async function initializeFireMap() {
     .attr('transform', `translate(${durationLegendWidth}, 0)`)
     .call(durationAxis);
 
+  // THIS IS THE CORRECTED CODE FOR THE FIRE SIZE LEGEND
   const sizeLegend = legendGroup.append('g')
     .attr('transform', `translate(0, ${durationLegendHeight + 40})`);
 
@@ -507,33 +505,31 @@ async function initializeFireMap() {
     .text('Fire Size');
 
   const fireSizes = [1000, 10000, 100000, 500000];
-  const labelOffset = 10;
+  const verticalSpacing = 40;
+  const horizontalOffset = 30;
 
-  sizeLegend.selectAll('circle')
+  const sizeLegendItems = sizeLegend.selectAll('g.size-item')
     .data(fireSizes)
-    .join('circle')
-    .attr('cx', 20)
-    .attr('cy', (d, i) => {
-      const prevRadii = fireSizes.slice(0, i).map(sizeScale);
-      const offset = prevRadii.reduce((sum, r) => sum + r * 2 + 8, 0);
-      return offset + sizeScale(d) + labelOffset;
-    })
+    .enter()
+    .append('g')
+    .attr('class', 'size-item')
+    .attr('transform', (d, i) => `translate(0, ${i * verticalSpacing + 20})`); // Offset the group for each item
+
+  sizeLegendItems.append('circle')
+    .attr('cx', horizontalOffset)
+    .attr('cy', 0)
     .attr('r', d => sizeScale(d))
     .attr('fill', 'none')
     .attr('stroke', '#333');
 
-  sizeLegend.selectAll('text.size-label')
-    .data(fireSizes)
-    .join('text')
-    .attr('class', 'size-label')
-    .attr('x', 45)
-    .attr('y', (d, i) => {
-      const prevRadii = fireSizes.slice(0, i).map(sizeScale);
-      const offset = prevRadii.reduce((sum, r) => sum + r * 2 + 8, 0);
-      return offset + sizeScale(d) + 4 + labelOffset;
-    })
+  sizeLegendItems.append('text')
+    .attr('x', horizontalOffset + sizeScale(fireSizes[fireSizes.length-1]) + 10)
+    .attr('y', 0)
+    .attr('alignment-baseline', 'middle')
     .style('font-size', '11px')
     .text(d => `${d.toLocaleString()} acres`);
+
+  // END OF CORRECTED CODE FOR FIRE SIZE LEGEND
 
   // Initial render
   update();
