@@ -1,377 +1,551 @@
+// The ES module import statements are crucial for this to work.
 import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
 import * as topojson from "https://cdn.jsdelivr.net/npm/topojson@3/+esm";
 
+/* This script creates a dynamic map of California wildfires.
+    It includes features like filtering by fire cause, searching by name,
+    a time slider, and interactive legends for fire duration and size.
+*/
 
-const width = 700,
- height = 900;
- const container = document.getElementById("vis");
-const main = document.createElement("div");
-main.style.display = "flex";
-main.style.flexDirection = "column";
-main.style.gap = "0.75rem";
-main.style.position = "relative";
-container.appendChild(main);
+async function initializeFireMap() {
+  const width = 1200;
+  const height = 800;
 
+  // --- HTML Elements ---
+  const container = document.createElement('div');
+  container.style.cssText = 'display: flex; flex-direction: column; gap: 0.75rem; position: relative;';
+  
+  const svg = d3.create('svg')
+    .attr('viewBox', [0, 0, width, height])
+    .style('border', '1px solid #ccc');
+  
+  const tooltip = document.createElement('div');
+  tooltip.style.cssText = 'position: absolute; background: white; border: 1px solid #ccc; padding: 8px; font-size: 12px; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); display: none; pointer-events: none; max-width: 220px; z-index: 1;';
+  
+  const resetZoomBtn = document.createElement('button');
+  resetZoomBtn.textContent = 'Reset Zoom';
+  resetZoomBtn.style.fontSize = '12px';
 
-const svg = d3
- .create("svg")
- .attr("viewBox", [0, 0, width, height])
- .style("border", "1px solid #ccc");
+  // --- D3 Groups for layering ---
+  const zoomGroup = svg.append('g');
+  const mapGroup = zoomGroup.append('g');
+  const circlesGroup = zoomGroup.append('g');
+  const pointerGroup = zoomGroup.append('g');
+  const legendGroup = svg.append('g').attr('transform', `translate(${width - 140}, 20)`);
 
+  // --- Data and Scales ---
+  // THIS IS THE CRITICAL CHANGE: from `d3.csv` to `d3.json`
+  const fires = await d3.json('data/fires.json');
 
-const label = document.createElement("div");
-label.style.fontWeight = "bold";
-label.style.fontSize = "14px";
-main.appendChild(label);
+  // The rest of the parsing logic is now done in a `.map` call,
+  // since `d3.json` doesn't have a built-in row parsing function.
+  const parsedFires = fires.map(d => {
+    const parsed = {
+      ...d,
+      latitude: +d.latitude,
+      longitude: +d.longitude,
+      FIRE_SIZE: +d.FIRE_SIZE,
+      FIRE_DURATION_DAYS: +d.FIRE_DURATION_DAYS,
+      DISCOVERY_DATETIME: d.DISCOVERY_DATETIME ? new Date(d.DISCOVERY_DATETIME) : null,
+      CONT_DATETIME: d.CONT_DATETIME ? new Date(d.CONT_DATETIME) : null,
+    };
+    if (isNaN(parsed.latitude) || isNaN(parsed.longitude) || !parsed.DISCOVERY_DATETIME) {
+      return null;
+    }
+    return parsed;
+  }).filter(d => d); // Filter out any null entries
 
+  const formatDate = d3.timeFormat('%B %d, %Y');
+  const formatInputDate = d3.timeFormat('%Y-%m-%d');
+  const dateExtent = d3.extent(parsedFires, d => d.DISCOVERY_DATETIME);
+  const days = d3.timeDays(dateExtent[0], d3.timeDay.offset(dateExtent[1], 1));
+  
+  const colorScale = d3.scaleSequential()
+    .domain([30, 0])
+    .interpolator(d3.interpolateCividis);
+  
+  const sizeScale = d3.scaleSqrt()
+    .domain([0, 1000000])
+    .range([0, 30]);
 
-// UI placeholders
-const slider = document.createElement("input");
-slider.type = "range";
-slider.style.flex = 1;
+  const projection = d3.geoAlbers()
+    .rotate([120, 0])
+    .center([0, 37.5])
+    .parallels([29.5, 45.5])
+    .scale(4000)
+    .translate([width / 2, height / 2]);
+  
+  const path = d3.geoPath().projection(projection);
 
+  // --- Map Drawing ---
+  const us = await d3.json('https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json');
+  const california = topojson.feature(us, us.objects.states)
+    .features.find(d => d.id === '06');
 
-const datePicker = document.createElement("input");
-datePicker.type = "date";
-datePicker.style.fontSize = "12px";
+  mapGroup.append('path')
+    .datum(california)
+    .attr('fill', '#f0f0f0')
+    .attr('stroke', '#888')
+    .attr('d', path)
+    .lower();
+  
+  // --- Animation and Control Variables ---
+  let interval = null;
+  let isPlaying = false;
+  let searchTargetFire = null;
 
+  // --- UI Controls ---
+  const label = document.createElement('div');
+  label.style.cssText = 'font-weight: bold; font-size: 14px;';
+  
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = '0';
+  slider.max = days.length - 1;
+  slider.step = '1';
+  slider.value = '0';
+  slider.style.flex = '1';
 
-const playBtn = document.createElement("button");
-playBtn.textContent = "▶ Play";
-playBtn.style.padding = "4px 8px";
-playBtn.style.fontSize = "12px";
+  const datePicker = document.createElement('input');
+  datePicker.type = 'date';
+  datePicker.value = formatInputDate(days[0]);
+  datePicker.min = formatInputDate(days[0]);
+  datePicker.max = formatInputDate(days[days.length - 1]);
+  datePicker.style.fontSize = '12px';
 
+  const playBtn = document.createElement('button');
+  playBtn.textContent = '▶ Play';
+  playBtn.style.cssText = 'padding: 4px 8px; font-size: 12px;';
 
-const searchBox = document.createElement("input");
-searchBox.type = "text";
-searchBox.placeholder = "Search fire name...";
-searchBox.style.width = "100%";
-searchBox.style.padding = "4px";
-searchBox.style.fontSize = "12px";
+  const speedControl = document.createElement('select');
+  speedControl.style.fontSize = '12px';
+  [1, 2, 3, 4, 5].forEach(x => {
+    const option = document.createElement('option');
+    option.value = x;
+    option.textContent = `${x}x`;
+    speedControl.appendChild(option);
+  });
+  
+  const searchBox = document.createElement('input');
+  searchBox.type = 'text';
+  searchBox.placeholder = 'Search fire name...';
+  searchBox.style.cssText = 'flex: 1; padding: 4px; font-size: 12px;';
+  
+  const searchBtn = document.createElement('button');
+  searchBtn.textContent = 'Search';
+  searchBtn.style.cssText = 'padding: 4px 8px; font-size: 12px;';
+  
+  const clearBtn = document.createElement('button');
+  clearBtn.textContent = '✕';
+  clearBtn.style.cssText = 'padding: 4px 6px; font-size: 12px;';
+  clearBtn.style.display = 'none';
 
+  const searchContainer = document.createElement('div');
+  searchContainer.style.cssText = 'display: flex; align-items: center; gap: 0.5rem; width: 100%;';
+  searchContainer.append(searchBox, searchBtn, clearBtn);
+  
+  const dateControls = document.createElement('div');
+  dateControls.style.cssText = 'display: flex; align-items: center; gap: 1rem;';
+  dateControls.append(slider, datePicker, playBtn, document.createTextNode('Speed: '), speedControl);
 
-const dateControls = document.createElement("div");
-dateControls.style.display = "flex";
-dateControls.style.alignItems = "center";
-dateControls.style.gap = "1rem";
-dateControls.append(slider, datePicker, playBtn);
+  const causes = Array.from(new Set(parsedFires.map(d => d.NWCG_GENERAL_CAUSE))).sort();
+  const selectAllBtn = document.createElement('button');
+  selectAllBtn.type = 'button';
+  selectAllBtn.textContent = 'Select None';
+  selectAllBtn.style.fontSize = '12px';
+  
+  let allSelected = true;
+  const causeCheckboxes = causes.map(cause => {
+    const label = document.createElement('label');
+    label.style.fontSize = '12px';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.name = 'cause';
+    input.value = cause;
+    input.checked = true;
+    label.append(input, document.createTextNode(` ${cause}`));
+    return label;
+  });
 
+  const causeFilterForm = document.createElement('form');
+  causeFilterForm.style.cssText = 'display: flex; flex-direction: column; gap: 0.25rem;';
+  const causeCheckboxesContainer = document.createElement('div');
+  causeCheckboxesContainer.style.cssText = 'display: flex; flex-wrap: wrap; gap: 0.5rem;';
+  causeCheckboxes.forEach(cb => causeCheckboxesContainer.appendChild(cb));
+  causeFilterForm.append(selectAllBtn, causeCheckboxesContainer);
 
-main.appendChild(dateControls);
-main.appendChild(document.createTextNode("Filter by Cause:"));
+  // --- Append UI elements to container ---
+  container.append(
+    label,
+    dateControls,
+    document.createTextNode('Filter by Cause:'),
+    causeFilterForm,
+    document.createTextNode('Search by Fire Name:'),
+    searchContainer,
+    resetZoomBtn,
+    svg.node(),
+    tooltip
+  );
 
+  // --- Yearly Stats Table ---
+  const yearlyStats = d3.rollups(
+    parsedFires,
+    v => ({
+      avgDuration: d3.mean(v, d => d.FIRE_DURATION_DAYS),
+      avgSize: d3.mean(v, d => d.FIRE_SIZE)
+    }),
+    d => d.DISCOVERY_DATETIME.getFullYear()
+  )
+  .sort((a, b) => d3.ascending(a[0], b[0]));
+  
+  const statsContainer = document.createElement('div');
+  statsContainer.style.cssText = `
+    position: absolute;
+    top: 490px;
+    right: 20px;
+    width: 200px;
+    background: white;
+    border: 1px solid #ccc;
+    padding: 8px;
+    font-size: 12px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    z-index: 2;
+  `;
+  statsContainer.innerHTML = `
+    <div><strong>Avg Duration & Size by Year</strong></div>
+    <table style="border-collapse: collapse; margin-top: 4px; font-size: 11px;">
+      <thead>
+        <tr>
+          <th style="text-align: left; padding: 2px 6px; border-bottom: 1px solid #ccc;">Year</th>
+          <th style="text-align: right; padding: 2px 6px; border-bottom: 1px solid #ccc;">Duration in Days</th>
+          <th style="text-align: right; padding: 2px 6px; border-bottom: 1px solid #ccc;">Size in Acres</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${yearlyStats.map(([year, stats]) => `
+          <tr>
+            <td style="padding: 2px 6px;">${year}</td>
+            <td style="text-align: right; padding: 2px 6px;">${stats.avgDuration?.toFixed(1) || '–'}</td>
+            <td style="text-align: right; padding: 2px 6px;">${Math.round(stats.avgSize).toLocaleString() || '–'}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
 
-const causeFilter = document.createElement("form");
-causeFilter.style.display = "flex";
-causeFilter.style.flexWrap = "wrap";
-causeFilter.style.gap = "0.5rem";
-main.appendChild(causeFilter);
+  container.appendChild(statsContainer);
 
+  // --- Update Function (Core Logic) ---
+  function update() {
+    const selectedIndex = +slider.value;
+    const selectedDate = days[selectedIndex];
+    label.textContent = formatDate(selectedDate);
+    datePicker.value = formatInputDate(selectedDate);
 
-main.appendChild(document.createTextNode("Search by Fire Name:"));
-main.appendChild(searchBox);
-main.appendChild(svg.node());
+    const selectedCauses = Array.from(causeFilterForm.querySelectorAll('input:checked'))
+      .map(input => input.value);
+    
+    const query = searchBox.value.trim().toLowerCase();
+    
+    let filteredFires = parsedFires.filter(d => 
+      d.DISCOVERY_DATETIME <= selectedDate &&
+      (!d.CONT_DATETIME || selectedDate < d.CONT_DATETIME) &&
+      selectedCauses.includes(d.NWCG_GENERAL_CAUSE) &&
+      (query === '' || (d.FIRE_NAME && d.FIRE_NAME.toLowerCase().includes(query)))
+    );
 
+    pointerGroup.selectAll('line').remove();
+    pointerGroup.selectAll('defs').remove();
+    
+    if (searchTargetFire) {
+      searchTargetFire.forEach(fire => {
+        const [x, y] = projection([fire.longitude, fire.latitude]);
+        if (x && y) {
+          // Arrowhead marker definition
+          const defs = pointerGroup.append('defs');
+          defs.append('marker')
+            .attr('id', 'arrowhead')
+            .attr('viewBox', '0 0 10 10')
+            .attr('refX', 5)
+            .attr('refY', 5)
+            .attr('markerWidth', 6)
+            .attr('markerHeight', 6)
+            .attr('orient', 'auto-start-reverse')
+            .append('path')
+            .attr('d', 'M 0 0 L 10 5 L 0 10 z')
+            .attr('fill', 'black');
+          
+          pointerGroup.append('line')
+            .datum(fire)
+            .attr('x1', x)
+            .attr('y1', y - 25)
+            .attr('x2', x)
+            .attr('y2', y - 5)
+            .attr('stroke', 'black')
+            .attr('stroke-width', 2)
+            .attr('marker-end', 'url(#arrowhead)')
+            .style('cursor', 'pointer')
+            .on('mouseenter', function(event, d) {
+              const rect = container.getBoundingClientRect();
+              tooltip.style.display = 'block';
+              tooltip.style.left = `${event.clientX - rect.left + 10}px`;
+              tooltip.style.top = `${event.clientY - rect.top + 10}px`;
+              tooltip.innerHTML = `
+                <strong>Fire Name:</strong> ${d.FIRE_NAME || '(Unnamed Fire)'}<br>
+                <strong>Cause:</strong> ${d.NWCG_GENERAL_CAUSE || 'Unknown'}<br>
+                <strong>County:</strong> ${d.COUNTY || 'Unknown'}<br>
+                <b>Size:</b> ${d.FIRE_SIZE.toLocaleString()} acres<br>
+                <b>Duration:</b> ${d.FIRE_DURATION_DAYS === 0 ? 'Unknown' : d.FIRE_DURATION_DAYS.toFixed(1) + ' days'}<br>
+                <b>Discovered:</b> ${formatDate(d.DISCOVERY_DATETIME)}<br>
+                <b>Contained:</b> ${d.CONT_DATETIME ? formatDate(d.CONT_DATETIME) : 'N/A'}`;
+            })
+            .on('mousemove', function(event) {
+              const rect = container.getBoundingClientRect();
+              tooltip.style.left = `${event.clientX - rect.left + 10}px`;
+              tooltip.style.top = `${event.clientY - rect.top + 10}px`;
+            })
+            .on('mouseleave', function() {
+              tooltip.style.display = 'none';
+            });
+        }
+      });
+    }
 
-const tooltip = document.createElement("div");
-Object.assign(tooltip.style, {
- position: "absolute",
- background: "white",
- border: "1px solid #ccc",
- padding: "8px",
- fontSize: "12px",
- borderRadius: "4px",
- boxShadow: "0 2px 4px rgba(0,0,0,0.1)",
- display: "none",
- pointerEvents: "none",
- maxWidth: "220px",
- zIndex: 1
-});
-main.appendChild(tooltip);
+    circlesGroup.selectAll('circle')
+      .data(filteredFires, d => d.FIRE_NAME + d.latitude + d.longitude + d.DISCOVERY_DATETIME)
+      .join(
+        enter => enter.append('circle')
+          .attr('cx', d => projection([d.longitude, d.latitude])[0])
+          .attr('cy', d => projection([d.longitude, d.latitude])[1])
+          .attr('r', d => sizeScale(d.FIRE_SIZE))
+          .attr('fill', d => colorScale(Math.min(d.FIRE_DURATION_DAYS, 30)))
+          .attr('fill-opacity', 0.85)
+          .attr('stroke', '#333')
+          .attr('stroke-width', 0.3)
+          .style('cursor', 'pointer')
+          .on('mouseenter', function(event, d) {
+            const rect = container.getBoundingClientRect();
+            tooltip.style.display = 'block';
+            tooltip.style.left = `${event.clientX - rect.left + 10}px`;
+            tooltip.style.top = `${event.clientY - rect.top + 10}px`;
+            tooltip.innerHTML = `
+              <strong>Fire Name:</strong> ${d.FIRE_NAME || '(Unnamed Fire)'}<br>
+              <strong>Cause:</strong> ${d.NWCG_GENERAL_CAUSE || 'Unknown'}<br>
+              <strong>County:</strong> ${d.COUNTY || 'Unknown'}<br>
+              <b>Size:</b> ${d.FIRE_SIZE.toLocaleString()} acres<br>
+              <b>Duration:</b> ${d.FIRE_DURATION_DAYS === 0 ? 'Unknown' : d.FIRE_DURATION_DAYS.toFixed(1) + ' days'}<br>
+              <b>Discovered:</b> ${formatDate(d.DISCOVERY_DATETIME)}<br>
+              <b>Contained:</b> ${d.CONT_DATETIME ? formatDate(d.CONT_DATETIME) : 'N/A'}`;
+          })
+          .on('mousemove', function(event) {
+            const rect = container.getBoundingClientRect();
+            tooltip.style.left = `${event.clientX - rect.left + 10}px`;
+            tooltip.style.top = `${event.clientY - rect.top + 10}px`;
+          })
+          .on('mouseleave', function() {
+            tooltip.style.display = 'none';
+          }),
+        update => update,
+        exit => exit.remove()
+      );
+  }
 
+  // --- Animation Controls ---
+  function play() {
+    const speedMultiplier = +speedControl.value;
+    const max = +slider.max;
+    isPlaying = true;
+    playBtn.textContent = '⏸ Pause';
+    interval = setInterval(() => {
+      let current = +slider.value;
+      let next = current + speedMultiplier;
+      if (next > max) next = 0;
+      slider.value = next.toString();
+      update();
+    }, 50 / speedMultiplier);
+  }
 
-let fires = [];
-let days = [];
-let interval = null;
-let projection, path, durationScale, sizeScale;
+  function pause() {
+    clearInterval(interval);
+    interval = null;
+    isPlaying = false;
+    playBtn.textContent = '▶ Play';
+  }
+  
+  function handleSearch() {
+    const query = searchBox.value.trim().toLowerCase();
+    searchTargetFire = parsedFires.filter(d => d.FIRE_NAME && d.FIRE_NAME.toLowerCase() === query);
+    update();
+  }
 
+  // --- Event Listeners ---
+  slider.addEventListener('input', () => {
+    update();
+    if (interval) pause();
+  });
 
-(async function init() {
- fires = await d3.json("data/fires.json");
- const formatDate = d3.timeFormat("%B %d, %Y");
- const formatInputDate = d3.timeFormat("%Y-%m-%d");
+  datePicker.addEventListener('change', () => {
+    const pickedStr = datePicker.value;
+    const index = days.findIndex(d => formatInputDate(d) === pickedStr);
+    if (index >= 0) {
+      slider.value = index.toString();
+      update();
+      if (interval) pause();
+    }
+  });
 
+  causeFilterForm.addEventListener('change', update);
 
- const dateExtent = d3.extent(fires, (d) => new Date(d.DISCOVERY_DATETIME));
- days = d3.timeDays(dateExtent[0], d3.timeDay.offset(dateExtent[1], 1));
- const dayTimestamps = days.map((d) => +d);
+  selectAllBtn.addEventListener('click', () => {
+    allSelected = !allSelected;
+    causeCheckboxes.forEach(label => {
+      label.querySelector('input').checked = allSelected;
+    });
+    selectAllBtn.textContent = allSelected ? 'Select None' : 'Select All';
+    update();
+  });
 
+  playBtn.addEventListener('click', () => {
+    if (interval) pause();
+    else play();
+  });
 
- slider.min = 0;
- slider.max = days.length - 1;
- slider.step = 1;
- slider.value = 0;
+  speedControl.addEventListener('change', () => {
+    if (interval) {
+      pause();
+      play();
+    }
+  });
 
+  resetZoomBtn.onclick = () => {
+    svg.transition().duration(500).call(d3.zoom().transform, d3.zoomIdentity);
+  };
+  
+  searchBtn.addEventListener('click', handleSearch);
+  searchBox.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleSearch();
+    }
+  });
+  searchBox.addEventListener('input', () => {
+    clearBtn.style.display = searchBox.value ? 'inline-block' : 'none';
+  });
+  clearBtn.addEventListener('click', () => {
+    searchBox.value = '';
+    searchTargetFire = null;
+    update();
+    searchBox.focus();
+    clearBtn.style.display = 'none';
+  });
 
- datePicker.min = formatInputDate(days[0]);
- datePicker.max = formatInputDate(days[days.length - 1]);
- datePicker.value = formatInputDate(days[0]);
+  // --- Zoom Behavior ---
+  const zoom = d3.zoom()
+    .scaleExtent([1, 8])
+    .on('zoom', (event) => {
+      zoomGroup.attr('transform', event.transform);
+    });
+  svg.call(zoom);
 
+  // --- Legends ---
+  const durationLegendHeight = 150;
+  const durationLegendWidth = 15;
 
- const causes = Array.from(new Set(fires.map((d) => d.NWCG_GENERAL_CAUSE))).sort();
- causes.forEach((cause) => {
-   const label = document.createElement("label");
-   label.style.fontSize = "12px";
-   const input = document.createElement("input");
-   input.type = "checkbox";
-   input.name = "cause";
-   input.value = cause;
-   input.checked = true;
-   label.append(input, ` ${cause}`);
-   causeFilter.appendChild(label);
- });
+  const defs = svg.append('defs');
+  const gradientId = 'duration-gradient';
 
+  const gradient = defs.append('linearGradient')
+    .attr('id', gradientId)
+    .attr('x1', '0%')
+    .attr('y1', '100%')
+    .attr('x2', '0%')
+    .attr('y2', '0%');
 
- const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
- const california = topojson
-   .feature(us, us.objects.states)
-   .features.find((d) => d.id === "06");
+  const legendDomain = colorScale.domain();
+  const nStops = 10;
+  d3.range(nStops + 1).forEach(i => {
+    const t = i / nStops;
+    gradient.append('stop')
+      .attr('offset', `${t * 100}%`)
+      .attr('stop-color', colorScale(legendDomain[0] + t * (legendDomain[1] - legendDomain[0])));
+  });
 
+  const durationLegend = legendGroup.append('g').attr('class', 'duration-legend');
 
- projection = d3
-   .geoAlbers()
-   .rotate([120, 0])
-   .center([0, 37.5])
-   .parallels([29.5, 45.5])
-   .scale(4000)
-   .translate([width / 2, height / 2]);
+  durationLegend.append('text')
+    .attr('x', 0)
+    .attr('y', -6)
+    .style('font-size', '12px')
+    .text('Fire Duration');
 
+  durationLegend.append('rect')
+    .attr('x', 0)
+    .attr('y', 0)
+    .attr('width', durationLegendWidth)
+    .attr('height', durationLegendHeight)
+    .style('fill', `url(#${gradientId})`);
 
- path = d3.geoPath().projection(projection);
+  const durationScale = d3.scaleLinear()
+    .domain(legendDomain)
+    .range([durationLegendHeight, 0]);
 
+  const durationAxis = d3.axisRight(durationScale)
+    .ticks(5)
+    .tickFormat(d => `${d}d`);
 
- svg
-   .append("path")
-   .datum(california)
-   .attr("fill", "#f0f0f0")
-   .attr("stroke", "#888")
-   .attr("d", path)
-   .lower();
+  durationLegend.append('g')
+    .attr('transform', `translate(${durationLegendWidth}, 0)`)
+    .call(durationAxis);
 
+  const sizeLegend = legendGroup.append('g')
+    .attr('transform', `translate(0, ${durationLegendHeight + 40})`);
 
- const circlesGroup = svg.append("g");
- const colorScale = d3.scaleSequential().domain([0, 30]).interpolator(d3.interpolateYlOrRd);
- durationScale = d3.scaleLinear().domain([0, 30]).range([20, 280]);
- sizeScale = d3.scaleSqrt().domain([0, 1000000]).range([0, 30]);
+  sizeLegend.append('text')
+    .attr('x', 0)
+    .attr('y', 0)
+    .style('font-size', '12px')
+    .text('Fire Size');
 
+  const fireSizes = [1000, 10000, 100000, 500000];
+  const labelOffset = 10;
 
- function update() {
-   const selectedIndex = +slider.value;
-   const selectedDate = new Date(dayTimestamps[selectedIndex]);
-   label.textContent = formatDate(selectedDate);
-   datePicker.value = formatInputDate(selectedDate);
+  sizeLegend.selectAll('circle')
+    .data(fireSizes)
+    .join('circle')
+    .attr('cx', 20)
+    .attr('cy', (d, i) => {
+      const prevRadii = fireSizes.slice(0, i).map(sizeScale);
+      const offset = prevRadii.reduce((sum, r) => sum + r * 2 + 8, 0);
+      return offset + sizeScale(d) + labelOffset;
+    })
+    .attr('r', d => sizeScale(d))
+    .attr('fill', 'none')
+    .attr('stroke', '#333');
 
+  sizeLegend.selectAll('text.size-label')
+    .data(fireSizes)
+    .join('text')
+    .attr('class', 'size-label')
+    .attr('x', 45)
+    .attr('y', (d, i) => {
+      const prevRadii = fireSizes.slice(0, i).map(sizeScale);
+      const offset = prevRadii.reduce((sum, r) => sum + r * 2 + 8, 0);
+      return offset + sizeScale(d) + 4 + labelOffset;
+    })
+    .style('font-size', '11px')
+    .text(d => `${d.toLocaleString()} acres`);
 
-   const selectedCauses = Array.from(
-     causeFilter.querySelectorAll("input:checked")
-   ).map((input) => input.value);
-   const query = searchBox.value.trim().toLowerCase();
-
-
-   const fireData = fires
-     .map((d) => ({
-       name: d.FIRE_NAME,
-       lat: +d.latitude,
-       lon: +d.longitude,
-       size: +d.FIRE_SIZE,
-       discovered: new Date(d.DISCOVERY_DATETIME),
-       contained: d.CONT_DATETIME ? new Date(d.CONT_DATETIME) : null,
-       duration: +d.FIRE_DURATION_DAYS,
-       cause: d.NWCG_GENERAL_CAUSE
-     }))
-     .filter(
-       (d) =>
-         d.discovered <= selectedDate &&
-         (!d.contained || selectedDate < d.contained) &&
-         selectedCauses.includes(d.cause) &&
-         !isNaN(d.lat) &&
-         !isNaN(d.lon) &&
-         !isNaN(d.size) &&
-         !isNaN(d.duration) &&
-        //  (query === "" || d.name.toLowerCase().includes(query))
-        (query === "" || (d.name && d.name.toLowerCase().includes(query)))
-     );
-
-
-   tooltip.style.display = "none";
-
-
-   circlesGroup
-     .selectAll("circle")
-     .data(fireData, (d) => d.name + d.lat + d.lon)
-     .join(
-       (enter) =>
-         enter
-           .append("circle")
-           .attr("cx", (d) => projection([d.lon, d.lat])[0])
-           .attr("cy", (d) => projection([d.lon, d.lat])[1])
-           .attr("r", (d) => sizeScale(d.size))
-           .attr("fill", (d) => colorScale(Math.min(d.duration, 30)))
-           .attr("fill-opacity", 0.85)
-           .attr("stroke", "#333")
-           .attr("stroke-width", 0.3)
-           .style("cursor", "pointer")
-           .on("click", function (event, d) {
-             const rect = container.getBoundingClientRect();
-             tooltip.style.display = "block";
-             tooltip.style.left = `${event.clientX - rect.left + 10}px`;
-             tooltip.style.top = `${event.clientY - rect.top + 10}px`;
-             tooltip.innerHTML = `
-               <strong>${d.name || "(Unnamed Fire)"}</strong><br>
-               <b>Size:</b> ${d.size.toLocaleString()} acres<br>
-               <b>Duration:</b> ${
-                 d.duration === 0.0 ? "Unknown" : d.duration.toFixed(1) + " days"
-               }<br>
-               <b>Discovered:</b> ${formatDate(d.discovered)}<br>
-               <b>Contained:</b> ${d.contained ? formatDate(d.contained) : "N/A"}
-             `;
-             event.stopPropagation();
-           }),
-       (update) => update,
-       (exit) => exit.remove()
-     );
- }
-
-
- function play() {
-   playBtn.textContent = "⏸ Pause";
-   interval = setInterval(() => {
-     let next = +slider.value + 1;
-     if (next > +slider.max) {
-       clearInterval(interval);
-       playBtn.textContent = "▶ Play";
-       return;
-     }
-     slider.value = next;
-     update();
-   }, 300);
- }
-
-
- function pause() {
-   clearInterval(interval);
-   playBtn.textContent = "▶ Play";
- }
-
-////
-// Legend dimensions and positions
-const legendWidth = 260;
-const legendHeight = 12;
-const legendX = 40;
-const legendY = 30;
-
-// Add defs and linearGradient for color legend
-const defs = svg.append("defs");
-const linearGradient = defs.append("linearGradient")
-  .attr("id", "color-gradient")
-  .attr("x1", "0%")
-  .attr("x2", "100%");
-
-for (let i = 0; i <= 100; i++) {
-  linearGradient.append("stop")
-    .attr("offset", `${i}%`)
-    .attr("stop-color", d3.interpolateYlOrRd(i / 100));
+  // Initial render
+  update();
+  
+  return container;
 }
 
-// Add label for color legend
-svg.append("text")
-  .attr("x", legendX)
-  .attr("y", legendY - 10)
-  .attr("font-size", "12px")
-  .attr("font-weight", "bold")
-  .text("Fire Duration (days)");
-
-// Add color gradient rect
-svg.append("rect")
-  .attr("x", legendX)
-  .attr("y", legendY)
-  .attr("width", legendWidth)
-  .attr("height", legendHeight)
-  .style("fill", "url(#color-gradient)")
-  .attr("stroke", "#ccc");
-
-// Create a separate scale for the legend axis (pixels)
-const legendScale = d3.scaleLinear()
-  .domain([0, 30])
-  .range([legendX, legendX + legendWidth]);
-
-// Add axis below the gradient
-svg.append("g")
-  .attr("transform", `translate(0, ${legendY + legendHeight})`)
-  .call(d3.axisBottom(legendScale)
-    .tickValues([0, 5, 10, 15, 20, 25, 30])
-    .tickFormat(d => `${d} days`)
-  )
-  .selectAll("text")
-  .style("font-size", "10px");
-
-// Fire Size Legend
-const sizeLegendX = width - 130;
-const sizeLegendY = 50;
-
-const sizeLegend = svg.append("g")
-  .attr("transform", `translate(${sizeLegendX}, ${sizeLegendY})`);
-
-const sizeLegendValues = [10000, 100000, 500000];
-
-sizeLegendValues.forEach((size, i) => {
-  const y = i * 40;
-  sizeLegend.append("circle")
-    .attr("cx", 0)
-    .attr("cy", y)
-    .attr("r", sizeScale(size))
-    .attr("fill", "none")
-    .attr("stroke", "#555");
-
-  sizeLegend.append("text")
-    .attr("x", 40)
-    .attr("y", y)
-    .attr("alignment-baseline", "middle")
-    .attr("font-size", "11px")
-    .text(`${(size / 1000).toLocaleString()}k acres`);
+// Attach the visualization to the 'vis' div when the document is ready.
+document.addEventListener('DOMContentLoaded', async () => {
+    const visContainer = document.getElementById('vis');
+    const mapContainer = await initializeFireMap();
+    if (visContainer && mapContainer) {
+        visContainer.appendChild(mapContainer);
+    }
 });
-
-sizeLegend.append("text")
-  .attr("x", 0)
-  .attr("y", -10)
-  .attr("font-size", "12px")
-  .attr("font-weight", "bold")
-  .text("Fire Size");
-////
-
-
- svg.on("click", () => (tooltip.style.display = "none"));
- slider.addEventListener("input", update);
- datePicker.addEventListener("change", () => {
-   const index = days.findIndex(
-     (d) => formatInputDate(d) === datePicker.value
-   );
-   if (index >= 0) {
-     slider.value = index;
-     update();
-   }
- });
- causeFilter.addEventListener("change", update);
-//  searchBox.addEventListener("input", update);
-searchBox.addEventListener("input", (e) => {
-  console.log("Search changed:", e.target.value);
-  update();
-});
- playBtn.addEventListener("click", () => {
-   if (interval) pause();
-   else play();
- });
-
-
- update();
-})();
